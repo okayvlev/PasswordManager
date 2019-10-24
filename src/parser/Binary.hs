@@ -18,12 +18,15 @@ import           Data.Word            (Word32)
 import           Prelude              hiding (concat, length, replicate,
                                        splitAt)
 
+import qualified Crypto.Hash.SHA256   as SHA256 (hash)
+
 import           Bytes
 import           Config
 import           Control.Arrow        ((>>>))
 import           Control.Lens         (over, view)
 import           Crypto               (decompress)
 import           Data.ByteString.Lazy (fromStrict, toStrict)
+import           GHC.IO.Unsafe        (unsafePerformIO)
 
 type BinParserT = StateT ByteString (Either String)
 
@@ -83,10 +86,11 @@ parsePayload' config =
 
 getPayload :: BinParserT [Block]
 getPayload = do
-  block@(Block _ sHash pbData) <- getBlock
+  block@(Block sid sHash pbData) <- getBlock
   if length pbData == 0 && sHash == replicate 32 0x0
     then return [block]
     else do
+      unless (sHash == SHA256.hash pbData) $ lift $ Left "file is corrupted (data hashes mismatch)"
       other <- getPayload
       return $ block : other
 

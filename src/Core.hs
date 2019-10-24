@@ -1,7 +1,6 @@
-{-# LANGUAGE BangPatterns #-}
-
 module Core
   ( loadDatabase
+  , saveDatabase
   ) where
 
 import           Data.ByteString      (readFile)
@@ -19,12 +18,14 @@ import           Renderer             (writeDatabase)
 loadDatabase :: String -> String -> IO (Either String Database)
 loadDatabase filePath password = do
   contents <- readFile filePath
-  return $ readDatabase contents [fromString password]
---  case db of
---    Right d -> do
---      print $ show (rootGroup d)
---      let bs = writeDatabase d
---      writeFile "out.kdbx" bs
---      return ()
---    Left e -> print e
---  return ()
+  let db = readDatabase contents [fromString password]
+  return db
+
+saveDatabase :: String -> Database -> IO (Either String ())
+saveDatabase filePath db = do
+  let contents = writeDatabase db
+  case contents of
+    Left e -> return $ Left e
+    Right c -> do
+      writeFile filePath c
+      return $ Right ()

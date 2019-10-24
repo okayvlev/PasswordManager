@@ -64,7 +64,7 @@ getConfig bs creds = parseConfig bs <&> set credentials creds
 decrypt :: ParserT ByteString
 decrypt = do
   config <- ask
-  rawData <- genMasterKey >>= decryptPayload
+  rawData <- decryptPayload
   let x = parsePayload config rawData
   case x of
     Left e  -> lift $ Left e

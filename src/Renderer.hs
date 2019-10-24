@@ -4,21 +4,25 @@ module Renderer
   ( writeDatabase
   ) where
 
-import           Bytes                    (fileSignature, fileVersion)
+import           Bytes                    (fileSignature, fileVersion,
+                                           prettyPrint)
 import           Config
-import           Control.Applicative      (liftA2, liftA3)
+import           Control.Applicative      (liftA2)
 import           Control.Lens             (view)
-import           Control.Monad.Reader     (Reader, ask, asks, lift, runReader,
-                                           (>=>))
+import           Control.Monad.Reader     (ReaderT, ask, asks, lift, runReader,
+                                           runReaderT, (>=>))
 import           Data.ByteString.Builder  (Builder, byteString, lazyByteString,
                                            toLazyByteString, word16LE, word32LE,
                                            word64LE, word8)
 import           Data.ByteString.Lazy     (ByteString, empty, fromStrict,
-                                           length, pack)
-import           Data.Word                (Word16, Word8)
-import           Prelude                  hiding (length)
+                                           length, pack, replicate, toStrict)
+import           Data.Word                (Word16, Word32, Word8)
+import           Prelude                  hiding (length, replicate)
 
-import           Crypto                   (initSalsa20)
+import qualified Crypto.Hash.SHA256       as SHA256 (hash)
+
+import           Crypto                   (compress, decompress, encryptPayload,
+                                           initSalsa20)
 import           GHC.IO.Unsafe            (unsafePerformIO)
 import           Parser.Base              (pprotect)
 import           Text.XML.HXT.Core        (ArrowXml, XmlTree, hasName,
@@ -29,11 +33,12 @@ import           Text.XML.HXT.DOM.ShowXml (xshow)
 
 import qualified Data.ByteString.Base64   as Base64 (encode)
 import qualified Data.ByteString.Char8    as CH (pack, unpack)
+import           Data.String              (fromString)
 
-type DBRenderer = Reader Database Builder
+type DBRenderer = ReaderT Database (Either String) Builder
 
-writeDatabase :: Database -> ByteString
-writeDatabase = runReader $ toLazyByteString <$> writeHeader
+writeDatabase :: Database -> Either String ByteString
+writeDatabase = runReaderT $ toLazyByteString <$> writeHeader
 
 writeHeader :: DBRenderer
 writeHeader = foldr1 (liftA2 mappend) [writeVersion, writeEntries, writePayload]
@@ -54,7 +59,8 @@ writeEntries = do
     writeEntry 7 (getLazy encryptionIV) <>
     writeEntry 8 (getLazy protectedStreamKey) <>
     writeEntry 9 (getLazy streamStartBytes) <>
-    writeEntryB 10 4 (word32LE . fromIntegral . fromEnum $ view innerRandomStreamId header)
+    writeEntryB 10 4 (word32LE . fromIntegral . fromEnum $ view innerRandomStreamId header) <>
+    writeEntry 0 (pack [0x0D, 0x0A, 0x0D, 0x0A])
 
 writeEntry :: Word8 -> ByteString -> Builder
 writeEntry id bs = word8 id <> word16LE len <> lazyByteString bs
@@ -67,11 +73,28 @@ writeEntryB id len b = word8 id <> word16LE len <> b
 writePayload :: DBRenderer
 writePayload = do
   db <- ask
-  let x = head $ makeXML db
-  let salsaKey = view (header . protectedStreamKey) (config db)
-  let xxx = snd $ runSLA pprotect ("", initSalsa20 salsaKey) x
-  return $ word16LE 1
---  let !xx = unsafePerformIO $ putStrLn $ xshow xxx
+  let cfg = config db
+      xTree = head $ makeXML db
+      salsaKey = view (header . protectedStreamKey) cfg
+      streamStart = view (header . streamStartBytes) cfg
+      xml = snd $ runSLA pprotect ("", initSalsa20 salsaKey) xTree
+      compression = view (header . compressionFlags) cfg
+      compF =
+        if compression == GZip
+          then compress
+          else id
+      bData = compF . fromString $ xshow xml
+      payload =
+        toStrict . toLazyByteString $
+        byteString streamStart <> writeBlock 0 (fromStrict $ SHA256.hash bData) (fromStrict bData) <>
+        writeBlock 1 (replicate 32 0x0) empty
+  case runReaderT (encryptPayload payload) cfg of
+    Right str -> return $ byteString str
+    Left e    -> lift $ Left e
+
+writeBlock :: Word32 -> ByteString -> ByteString -> Builder
+writeBlock id hash cont =
+  word32LE id <> lazyByteString hash <> word32LE (fromIntegral $ length cont) <> lazyByteString cont
 
 makeXML :: Database -> [XmlTree]
 makeXML db = runLA (genRoot db >>> indentDoc) ()
@@ -91,7 +114,9 @@ genEntry (DBEntry uuid username password title notes url) =
     , str "UserName" username
     , selem
         "String"
-        [mkelem "Password" [sattr "Protected" "True"] [txt $ (CH.pack >>> Base64.encode >>> CH.unpack) password]]
+        [ selem "Key" [txt "Password"]
+        , mkelem "Value" [sattr "Protected" "True"] [txt $ (CH.pack >>> Base64.encode >>> CH.unpack) password]
+        ]
     , str "Title" title
     , str "Notes" notes
     , str "URL" url

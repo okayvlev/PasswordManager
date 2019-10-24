@@ -1,9 +1,9 @@
 {-# LANGUAGE BlockArguments   #-}
 {-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE BangPatterns #-}
 
 module Crypto
   ( genMasterKey
+  , encryptPayload
   , decryptPayload
   , initSalsa20
   , applySalsa20
@@ -11,7 +11,7 @@ module Crypto
   , decompress
   ) where
 
-import           Control.Lens           (view, over, _1)
+import           Control.Lens           (over, view, _1)
 import           Control.Monad.Reader   (ReaderT, ask, asks, lift, runReaderT,
                                          (>=>))
 import           Data.ByteString        (ByteString, concat, empty, pack)
@@ -26,11 +26,11 @@ import           Data.Functor           ((<&>))
 import qualified Crypto.Cipher.AES128   as AES128
 import           Crypto.Cipher.Salsa    as Salsa
 import qualified Crypto.Hash.SHA256     as SHA256
-import qualified Data.ByteString.Base64 as Base64 (decode, encode)
 import           Crypto.Types
+import qualified Data.ByteString.Base64 as Base64 (decode, encode)
 
 import           Bytes                  (fixedIV)
-import qualified Codec.Compression.GZip as GZip (decompress, compress)
+import qualified Codec.Compression.GZip as GZip (compress, decompress)
 import           Data.Either            (fromRight)
 import           Data.Function          ((&))
 import           GHC.IO.Unsafe          (unsafePerformIO)
@@ -39,18 +39,27 @@ import           Config
 
 type CryptoT = ReaderT KDBConfig (Either String)
 
-decryptPayload :: ByteString -> CryptoT ByteString
-decryptPayload key = do
+decryptPayload :: CryptoT ByteString
+decryptPayload = do
+  mKey <- genMasterKey
   iv <- asks . view $ header . encryptionIV
   payload <- asks $ view payload
-  key <- genAESKey key
+  key <- genAESKey mKey
   return $ fst $ AES128.unCbc key (IV iv) payload
+
+encryptPayload :: ByteString -> CryptoT ByteString
+encryptPayload payload = do
+  mKey <- genMasterKey
+  iv <- asks . view $ header . encryptionIV
+  key <- genAESKey mKey
+  return $ fst $ AES128.cbc key (IV iv) payload
 
 initSalsa20 :: ByteString -> Salsa.State
 initSalsa20 key = Salsa.initialize 20 (SHA256.hash key) fixedIV
 
 applySalsa20 :: Salsa.State -> String -> (String, Salsa.State)
-applySalsa20 sa = CH.pack >>> Base64.decode >>> fromRight empty >>> Salsa.combine sa >>> over _1 (CH.unpack . Base64.encode)
+applySalsa20 sa =
+  CH.pack >>> Base64.decode >>> fromRight empty >>> Salsa.combine sa >>> over _1 (CH.unpack . Base64.encode)
 
 genCompKey :: CryptoT ByteString
 genCompKey = asks view credentials <&> (map SHA256.hash >>> concat >>> SHA256.hash)
